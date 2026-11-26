@@ -1,0 +1,71 @@
+name: Build PCRemote (IPA + EXE)
+
+on:
+  push:
+    branches: [pc-remote]
+    paths-ignore: ['builds/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+      - name: Build (unsigned)
+        working-directory: ios
+        run: |
+          xcodebuild -project PCRemote.xcodeproj -scheme PCRemote \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tail -80
+          test -d build/Build/Products/Release-iphoneos/PCRemote.app
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R ios/build/Build/Products/Release-iphoneos/PCRemote.app Payload/
+          zip -qry PCRemote.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with: { name: ipa, path: PCRemote.ipa }
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Build EXE
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller mss pillow pyautogui qrcode
+          pyinstaller --onefile --name PCRemote --clean pc/server.py
+      - uses: actions/upload-artifact@v4
+        with: { name: exe, path: dist/PCRemote.exe }
+
+  publish:
+    needs: [ios, windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: Commit builds to branch
+        run: |
+          mkdir -p builds
+          cp art/ipa/PCRemote.ipa builds/ 2>/dev/null || echo "no ipa"
+          cp art/exe/PCRemote.exe builds/ 2>/dev/null || echo "no exe"
+          echo "ios=${{ needs.ios.result }} windows=${{ needs.windows.result }} run=${{ github.run_id }}" > builds/status.txt
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add builds
+          git commit -m "Builds from run ${{ github.run_id }} [skip ci]" || exit 0
+          git push
